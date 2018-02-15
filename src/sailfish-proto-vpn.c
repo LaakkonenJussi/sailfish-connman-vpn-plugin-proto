@@ -919,19 +919,6 @@ static int pv_device_flags(struct vpn_provider *provider)
 	return ov_device_flags(provider);
 }
 
-/*
- * VPN driver structure, defined in connman/vpn/plugins/vpn.h
- */
-static struct vpn_driver vpn_driver = {
-/*		.flags			= VPN_FLAG_NO_TUN, predefine flags for plugin */
-        .notify         = pv_notify,
-        .connect        = pv_connect,
-        .disconnect		= pv_disconnect,
-        .error_code     = pv_error_code,
-        .save           = pv_save,
-        .device_flags   = pv_device_flags,
-};
-
 int pv_route_env_parse(struct vpn_provider *provider, const char *key,
 			int *family, unsigned long *idx, int *type)
 {
@@ -940,27 +927,38 @@ int pv_route_env_parse(struct vpn_provider *provider, const char *key,
 	
 	connman_info("pv_route_env_parse");
 	
-	if (!g_ascii_strcasecmp(vpn_provider_get_type(provider), PLUGIN_NAME)) {
-		if (g_str_has_prefix(key, "route_network_")) {
-			start = key + strlen("route_network_");
-			*type = 2;//PROVIDER_ROUTE_TYPE_ADDR;
-		} else if (g_str_has_prefix(key, "route_netmask_")) {
-			start = key + strlen("route_netmask_");
-			*type = 1;//PROVIDER_ROUTE_TYPE_MASK;
-		} else if (g_str_has_prefix(key, "route_gateway_")) {
-			start = key + strlen("route_gateway_");
-			*type = 3;//PROVIDER_ROUTE_TYPE_GW;
-		} else
-			return -EINVAL;
+	if (g_str_has_prefix(key, "route_network_")) {
+		start = key + strlen("route_network_");
+		*type = 2;//PROVIDER_ROUTE_TYPE_ADDR;
+	} else if (g_str_has_prefix(key, "route_netmask_")) {
+		start = key + strlen("route_netmask_");
+		*type = 1;//PROVIDER_ROUTE_TYPE_MASK;
+	} else if (g_str_has_prefix(key, "route_gateway_")) {
+		start = key + strlen("route_gateway_");
+		*type = 3;//PROVIDER_ROUTE_TYPE_GW;
+	} else
+		return -EINVAL;
 
-		*family = AF_INET;
-		*idx = g_ascii_strtoull(start, &end, 10);
-	
-		
-		return 0;
-	}
-	return -EINVAL;
+	*family = AF_INET;
+	*idx = g_ascii_strtoull(start, &end, 10);
+
+	connman_info("pv_route_env_parse success");
+	return 0;
 }
+
+/*
+ * VPN driver structure, defined in connman/vpn/plugins/vpn.h
+ */
+static struct vpn_driver vpn_driver = {
+/*		.flags				= VPN_FLAG_NO_TUN, predefine flags for plugin */
+        .notify         	= pv_notify,
+        .connect        	= pv_connect,
+        .disconnect			= pv_disconnect,
+        .error_code     	= pv_error_code,
+        .save           	= pv_save,
+        .device_flags   	= pv_device_flags,
+        .route_env_parse 	= pv_route_env_parse,
+};
 
 /*
  * Initialization of the plugin. If connection to dbus is required use
@@ -973,7 +971,6 @@ static int protovpn_init(void)
 	connman_info("protovpn_init");
 	connection = connman_dbus_get_connection();
 	rval = vpn_register(PLUGIN_NAME, &vpn_driver, BIN_PATH);
-	rval += vpn_add_route_env_parse(PLUGIN_NAME, &pv_route_env_parse);
 	connman_info("protovpn_init done (%d)", rval);
 	return rval;
 	
