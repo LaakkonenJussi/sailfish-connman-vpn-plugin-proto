@@ -812,7 +812,8 @@ static int ov_connect(struct vpn_provider *provider,
 
 		/* Set up the path for the management interface */
 		data->mgmt_path = g_strconcat("/tmp/connman-vpn-management-",
-			vpn_provider_get_ident(provider), NULL);
+			vpn_provider_get_string(provider, "Host"), "-", 
+			vpn_provider_get_string(provider, "Domain"), NULL);
 		if (unlink(data->mgmt_path) != 0 && errno != ENOENT) {
 			connman_warn("Unable to unlink management socket %s: %d",
 						data->mgmt_path, errno);
