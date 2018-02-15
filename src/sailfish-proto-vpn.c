@@ -17,6 +17,11 @@
 
 /*
  * Handle notifys delivered over D-Bus via Connman.
+ *
+ * @msg: Message received via D-Bus
+ * @provider: vpn_provider structure for this plugin
+ *
+ * @return: 0 when success
  */
 static int pv_notify(DBusMessage *msg, struct vpn_provider *provider)
 {
@@ -28,10 +33,15 @@ static int pv_notify(DBusMessage *msg, struct vpn_provider *provider)
  * Connect VPN.
  * Get settings from provider using: vpn_provider_get_string().
  * Add arguments to task with connman_task_add_argument().
- * if_name 
- * cb
- * dbus_sender address of the caller
- * user_data 
+ * 
+ * @provider: vpn_provider structure for this plugin
+ * @task: connman task to use for executing the binary
+ * @if_name: interface name of the VPN plugin
+ * @cb: provider callback
+ * @dbus_sender: address of the caller
+ * @user_data: user specified data
+ *
+ * @return: 0 when success
  */
 static int pv_connect(struct vpn_provider *provider, struct connman_task *task,
 		const char *if_name, vpn_provider_connect_cb_t cb,
@@ -44,6 +54,8 @@ static int pv_connect(struct vpn_provider *provider, struct connman_task *task,
 /*
  * Handle VPN disconnect.
  *
+ * @provider: vpn_provider structure for this plugin
+ *
  * Implementation not madnatory.
  */
 void pv_disconnect(struct vpn_provider *provider)
@@ -54,6 +66,11 @@ void pv_disconnect(struct vpn_provider *provider)
 
 /*
  * Handle exit/error_code.
+ *
+ * @provider: vpn_provider structure for this plugin
+ * @exit_code: plugin exit code to handle
+ *
+ * @return: result of exit_code handling
  * 
  * Implementation not madnatory.
  */
@@ -65,6 +82,9 @@ static int pv_error_code(struct vpn_provider *provider, int exit_code)
 
 /*
  * Save the VPN configuration to a keyfile.
+ *
+ * @provider: vpn_provider structure for this plugin
+ * @keyfile: GKeyFile to use for saving
  *
  * Implementation not madnatory.
  */
@@ -79,6 +99,10 @@ static int pv_save(struct vpn_provider *provider, GKeyFile *keyfile)
  * based on the vpn_provider content.
  * Use vpn_provider_get_string(provider, parameter) to get proper parameter.
  *
+ * @provider: vpn_provider structure for this plugin
+ *
+ * @return: device flags for this plugin
+ *
  * Implementation not madnatory.
  */
 static int pv_device_flags(struct vpn_provider *provider)
@@ -88,21 +112,49 @@ static int pv_device_flags(struct vpn_provider *provider)
 }
 
 /*
+ * Function for parsing the enviroment values. If this function is defined it is
+ * called by vpn-provider.c:route_env_parse().
+ *
+ * @provider: vpn_provider structure for this plugin
+ * @key: Key to parse
+ * @family: Protocol family (AF_INET, AF_INET6)
+ * @idx: 
+ * @type: type of the provider route, defined as enum provider_route_type in
+ *        connman/vpn/vpn-provider.c. Values: PROVIDER_ROUTE_TYPE_NONE = 0,
+ *        PROVIDER_ROUTE_TYPE_MASK = 1, PROVIDER_ROUTE_TYPE_ADDR = 2 and
+ *        PROVIDER_ROUTE_TYPE_GW = 3
+ *
+ * @return: 0 when success
+ *
+ * Implementation not madnatory.
+ * 
+ */
+int pv_route_env_parse(struct vpn_provider *provider, const char *key,
+			int *family, unsigned long *idx, int *type)
+{
+	connman_info("pv_route_env_parse");
+	return 0;
+}
+
+/*
  * VPN driver structure, defined in connman/vpn/plugins/vpn.h
  */
 static struct vpn_driver vpn_driver = {
-/*		.flags			= VPN_FLAG_NO_TUN, predefine flags for plugin */
-        .notify         = pv_notify,
-        .connect        = pv_connect,
+/*	.flags			= VPN_FLAG_NO_TUN, predefine flags for plugin */
+        .notify			= pv_notify,
+        .connect		= pv_connect,
         .disconnect		= pv_disconnect,
-        .error_code     = pv_error_code,
-        .save           = pv_save,
-        .device_flags   = pv_device_flags,
+        .error_code		= pv_error_code,
+        .save			= pv_save,
+        .device_flags		= pv_device_flags,
+        .route_env_parse	= pv_route_env_parse,
 };
 
 /*
  * Initialization of the plugin. If connection to dbus is required use
  * connman_dbus_get_connection()
+ *
+ * @return: 0 when success
  */
 static int protovpn_init(void)
 {
