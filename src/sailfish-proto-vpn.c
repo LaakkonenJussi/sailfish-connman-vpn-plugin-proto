@@ -60,7 +60,8 @@
 #include <connman/setting.h>
 #include <connman/vpn-dbus.h>
 
-#include <connman/vpn/vpn-external.h> 	// VPN main header
+#include <connman/vpn/plugins/vpn.h>	// VPN main header
+#include <connman/vpn/vpn-agent.h> 	// VPN agent header
 
 
 static DBusConnection *connection;
