@@ -23,7 +23,8 @@
 #include <connman/task.h> 		// Connman binary execution
 #include <connman/log.h>		// Connman logging functions
 
-#include <connman/vpn/vpn-external.h> 	// VPN main header
+#include <connman/vpn/plugins/vpn.h>	// VPN plugin main header
+#include <connman/vpn/vpn-agent.h> 	// VPN agent header
 
 /*
  * Handle notifys delivered over D-Bus via Connman.
