@@ -1,9 +1,9 @@
-Name: sailfish-connman-vpn-plugin-proto
+Name: sailfish-connman-vpn-plugin-proto-test
 Version: 0.0.1
 Release: 0
 Summary: Sailfish Connman external VPN plugin proto
 Group: Development/Libraries
-License: BSD-3-Clause
+License: GPLv2
 URL: https://github.com/LaakkonenJussi/sailfish-connman-vpn-plugin-proto
 Source: %{name}-%{version}.tar.bz2
 Requires: connman >= 1.32
@@ -16,7 +16,9 @@ Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 
 %description
-This package contains a prototype of Sailfish Connman external VPN plugin.
+This package contains a prototype of Sailfish ConnMan external VPN plugin. This
+is a clone from OpenVPN plugin from ConnMan and contains only the plugin
+content, openvpn-script is not included.
 
 %prep
 %setup -q -n %{name}-%{version}
