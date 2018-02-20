@@ -920,8 +920,27 @@ static int pv_device_flags(struct vpn_provider *provider)
 	return ov_device_flags(provider);
 }
 
+/*
+ * Function for parsing the enviroment values. If this function is defined it is
+ * called by vpn-provider.c:route_env_parse().
+ *
+ * @provider: vpn_provider structure for this plugin
+ * @key: Key to parse
+ * @family: Protocol family (AF_INET, AF_INET6)
+ * @idx: 
+ * @type: type of the provider route, defined as enum vpn_provider_route_type in
+ *        connman/vpn/vpn-provider.h. Values: PROVIDER_ROUTE_TYPE_NONE = 0,
+ *        PROVIDER_ROUTE_TYPE_MASK = 1, PROVIDER_ROUTE_TYPE_ADDR = 2 and
+ *        PROVIDER_ROUTE_TYPE_GW = 3
+ *
+ * @return: 0 when success
+ *
+ * Implementation not madnatory.
+ * 
+*/
+
 int pv_route_env_parse(struct vpn_provider *provider, const char *key,
-			int *family, unsigned long *idx, int *type)
+			int *family, unsigned long *idx, enum vpn_provider_route_type *type)
 {
 	char *end;
 	const char *start;
@@ -930,13 +949,13 @@ int pv_route_env_parse(struct vpn_provider *provider, const char *key,
 	
 	if (g_str_has_prefix(key, "route_network_")) {
 		start = key + strlen("route_network_");
-		*type = 2;//PROVIDER_ROUTE_TYPE_ADDR;
+		*type = VPN_PROVIDER_ROUTE_TYPE_ADDR;
 	} else if (g_str_has_prefix(key, "route_netmask_")) {
 		start = key + strlen("route_netmask_");
-		*type = 1;//PROVIDER_ROUTE_TYPE_MASK;
+		*type = VPN_PROVIDER_ROUTE_TYPE_MASK;
 	} else if (g_str_has_prefix(key, "route_gateway_")) {
 		start = key + strlen("route_gateway_");
-		*type = 3;//PROVIDER_ROUTE_TYPE_GW;
+		*type = VPN_PROVIDER_ROUTE_TYPE_GW;
 	} else
 		return -EINVAL;
 
