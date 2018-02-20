@@ -1,3 +1,13 @@
+/*
+ *
+ *  ConnMan external VPN plugin prototype.
+ *
+ *  Copyright (C) 2018  Jolla Ltd. All rights reserved.
+ *  Contact: jussi.laakkonen@jolla.com
+ *
+ *  License: propietary
+ */
+
 #define CONNMAN_API_SUBJECT_TO_CHANGE
 
 #define PLUGIN_NAME "protovpn"
