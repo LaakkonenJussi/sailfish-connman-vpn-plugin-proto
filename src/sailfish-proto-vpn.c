@@ -119,8 +119,8 @@ static int pv_device_flags(struct vpn_provider *provider)
  * @key: Key to parse
  * @family: Protocol family (AF_INET, AF_INET6)
  * @idx: 
- * @type: type of the provider route, defined as enum provider_route_type in
- *        connman/vpn/vpn-provider.c. Values: PROVIDER_ROUTE_TYPE_NONE = 0,
+ * @type: type of the provider route, defined as enum vpn_provider_route_type in
+ *        connman/vpn/vpn-provider.h. Values: PROVIDER_ROUTE_TYPE_NONE = 0,
  *        PROVIDER_ROUTE_TYPE_MASK = 1, PROVIDER_ROUTE_TYPE_ADDR = 2 and
  *        PROVIDER_ROUTE_TYPE_GW = 3
  *
@@ -130,7 +130,7 @@ static int pv_device_flags(struct vpn_provider *provider)
  * 
  */
 int pv_route_env_parse(struct vpn_provider *provider, const char *key,
-			int *family, unsigned long *idx, int *type)
+			int *family, unsigned long *idx, enum vpn_provider_route_type *type)
 {
 	connman_info("pv_route_env_parse");
 	return 0;
