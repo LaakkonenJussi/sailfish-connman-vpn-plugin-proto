@@ -218,6 +218,9 @@ static int ov_notify(DBusMessage *msg, struct vpn_provider *provider)
 	if (strcmp(reason, "up"))
 		return VPN_STATE_DISCONNECT;
 
+
+	vpn_provider_set_string(provider, "DefaultRoute", "false");
+
 	dbus_message_iter_recurse(&iter, &dict);
 
 	while (dbus_message_iter_get_arg_type(&dict) == DBUS_TYPE_DICT_ENTRY) {

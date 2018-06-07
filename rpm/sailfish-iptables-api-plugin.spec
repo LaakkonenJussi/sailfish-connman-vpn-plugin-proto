@@ -1,5 +1,5 @@
 Name: sailfish-connman-vpn-plugin-proto-test
-Version: 0.0.1
+Version: 0.0.2
 Release: 0
 Summary: Sailfish Connman external VPN plugin proto
 Group: Development/Libraries
