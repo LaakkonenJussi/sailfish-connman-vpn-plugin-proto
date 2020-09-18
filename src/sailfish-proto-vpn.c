@@ -3,7 +3,7 @@
  *  ConnMan VPN daemon
  *
  *  Copyright (C) 2010-2014  BMW Car IT GmbH.
- *  Copyright (C) 2016-2018 Jolla Ltd.
+ *  Copyright (C) 2016-2020  Jolla Ltd.
  *
  *  Contact: jussi.laakkonen@jolla.com
  *
@@ -63,14 +63,13 @@
 #include <connman/vpn/plugins/vpn.h>	// VPN main header
 #include <connman/vpn/vpn-agent.h> 	// VPN agent header
 
-
 static DBusConnection *connection;
 
 struct {
 	const char *cm_opt;
-	const char *ov_opt;
+	const char *pv_opt;
 	char       has_value;
-} ov_options[] = {
+} pv_options[] = {
 	{ "Host", "--remote", 1 },
 	{ "ProtoVPN.CACert", "--ca", 1 },
 	{ "ProtoVPN.Cert", "--cert", 1 },
@@ -94,7 +93,7 @@ struct {
 	{ "ProtoVPN.Verb", "--verb", 1 },
 };
 
-struct ov_private_data {
+struct pv_private_data {
 	struct vpn_provider *provider;
 	struct connman_task *task;
 	char *dbus_sender;
@@ -108,22 +107,53 @@ struct ov_private_data {
 	GIOChannel *mgmt_channel;
 	int connect_attempts;
 	int failed_attempts;
+	int failed_attempts_privatekey;
 };
 
-static void free_private_data(struct ov_private_data *data)
+/*
+ * From openvpn.c. Function to finalize the connection in any case. by calling
+ * the vpn-provider.c callback.
+ */
+static void pv_connect_done(struct pv_private_data *data, int err)
 {
+	if (data && data->cb) {
+		vpn_provider_connect_cb_t cb = data->cb;
+		void *user_data = data->user_data;
+
+		/* Make sure we don't invoke this callback twice */
+		data->cb = NULL;
+		data->user_data = NULL;
+		cb(data->provider, user_data, err);
+	}
+
+	if (!err) {
+		data->failed_attempts = 0;
+		data->failed_attempts_privatekey = 0;
+	}
+}
+
+/* From openvpn.c */
+static void free_private_data(struct pv_private_data *data)
+{
+	if (vpn_provider_get_plugin_data(data->provider) == data)
+		vpn_provider_set_plugin_data(data->provider, NULL);
+
+	pv_connect_done(data, EIO);
+	vpn_provider_unref(data->provider);
 	g_free(data->dbus_sender);
 	g_free(data->if_name);
 	g_free(data->mgmt_path);
 	g_free(data);
 }
 
+/* From openvpn.c */
 struct nameserver_entry {
 	int id;
 	char *nameserver;
 };
 
-static struct nameserver_entry *ov_append_dns_entries(const char *key,
+/* From openvpn.c */
+static struct nameserver_entry *pv_append_dns_entries(const char *key,
 						const char *value)
 {
 	struct nameserver_entry *entry = NULL;
@@ -152,7 +182,8 @@ static struct nameserver_entry *ov_append_dns_entries(const char *key,
 	return entry;
 }
 
-static char *ov_get_domain_name(const char *key, const char *value)
+/* From openvpn.c */
+static char *pv_get_domain_name(const char *key, const char *value)
 {
 	gchar **options;
 	char *domain = NULL;
@@ -175,6 +206,7 @@ static char *ov_get_domain_name(const char *key, const char *value)
 	return domain;
 }
 
+/* From openvpn.c */
 static gint cmp_ns(gconstpointer a, gconstpointer b)
 {
 	struct nameserver_entry *entry_a = (struct nameserver_entry *)a;
@@ -189,6 +221,7 @@ static gint cmp_ns(gconstpointer a, gconstpointer b)
 	return 0;
 }
 
+/* From openvpn.c */
 static void free_ns_entry(gpointer data)
 {
 	struct nameserver_entry *entry = data;
@@ -197,13 +230,15 @@ static void free_ns_entry(gpointer data)
 	g_free(entry);
 }
 
-static int ov_notify(DBusMessage *msg, struct vpn_provider *provider)
+/* From openvpn.c. For reacting to notify coming via script from the VPN */
+static int pv_vpn_notify(DBusMessage *msg, struct vpn_provider *provider)
 {
 	DBusMessageIter iter, dict;
 	const char *reason, *key, *value;
 	char *address = NULL, *gateway = NULL, *peer = NULL, *netmask = NULL;
 	struct connman_ipaddress *ipaddress;
 	GSList *nameserver_list = NULL;
+	struct pv_private_data *data = vpn_provider_get_plugin_data(provider);
 
 	dbus_message_iter_init(msg, &iter);
 
@@ -215,11 +250,16 @@ static int ov_notify(DBusMessage *msg, struct vpn_provider *provider)
 		return VPN_STATE_FAILURE;
 	}
 
-	if (strcmp(reason, "up"))
+	if (strcmp(reason, "up")) {
+		pv_connect_done(data, EIO);
 		return VPN_STATE_DISCONNECT;
+	}
 
-
-	vpn_provider_set_string(provider, "DefaultRoute", "false");
+	/*
+	 * Note, this is better done via UI or VPN D-Bus API but can be forced
+	 * here as well. "false" = non-default route.
+	 */
+	//vpn_provider_set_string(provider, "DefaultRoute", "false");
 
 	dbus_message_iter_recurse(&iter, &dict);
 
@@ -249,11 +289,11 @@ static int ov_notify(DBusMessage *msg, struct vpn_provider *provider)
 		if (g_str_has_prefix(key, "route_"))
 			vpn_provider_append_route(provider, key, value);
 
-		if ((ns_entry = ov_append_dns_entries(key, value)))
+		if ((ns_entry = pv_append_dns_entries(key, value)))
 			nameserver_list = g_slist_prepend(nameserver_list,
 							ns_entry);
 		else {
-			char *domain = ov_get_domain_name(key, value);
+			char *domain = pv_get_domain_name(key, value);
 			if (domain) {
 				vpn_provider_set_domain(provider, domain);
 				g_free(domain);
@@ -311,41 +351,51 @@ static int ov_notify(DBusMessage *msg, struct vpn_provider *provider)
 	g_free(netmask);
 	connman_ipaddress_free(ipaddress);
 
+	pv_connect_done(data, 0);
 	return VPN_STATE_CONNECT;
 }
 
-static int ov_save(struct vpn_provider *provider, GKeyFile *keyfile)
+/*
+ * From openvpn.c. Save options specific to this VPN only, provider saves
+ * provider related 
+ */
+static int pv_vpn_save(struct vpn_provider *provider, GKeyFile *keyfile)
 {
 	const char *option;
 	int i;
 
-	for (i = 0; i < (int)ARRAY_SIZE(ov_options); i++) {
-		if (strncmp(ov_options[i].cm_opt, "ProtoVPN.", 8) == 0) {
+	for (i = 0; i < (int)ARRAY_SIZE(pv_options); i++) {
+		if (strncmp(pv_options[i].cm_opt, "ProtoVPN.", 8) == 0) {
 			option = vpn_provider_get_string(provider,
-							ov_options[i].cm_opt);
+							pv_options[i].cm_opt);
 			if (!option)
 				continue;
 
 			g_key_file_set_string(keyfile,
 					vpn_provider_get_save_group(provider),
-					ov_options[i].cm_opt, option);
+					pv_options[i].cm_opt, option);
 		}
 	}
+
 	return 0;
 }
 
+/*
+ * From openvpn.c. Add configuration data for task to be used as startup
+ * args 
+ */
 static int task_append_config_data(struct vpn_provider *provider,
 					struct connman_task *task)
 {
 	const char *option;
 	int i;
 
-	for (i = 0; i < (int)ARRAY_SIZE(ov_options); i++) {
-		if (!ov_options[i].ov_opt)
+	for (i = 0; i < (int)ARRAY_SIZE(pv_options); i++) {
+		if (!pv_options[i].pv_opt)
 			continue;
 
 		option = vpn_provider_get_string(provider,
-					ov_options[i].cm_opt);
+					pv_options[i].cm_opt);
 		if (!option)
 			continue;
 
@@ -353,38 +403,33 @@ static int task_append_config_data(struct vpn_provider *provider,
 		 * If the AuthUserPass option is "-", provide the input
 		 * via management interface
 		 */
-		if (!strcmp(ov_options[i].cm_opt, "ProtoVPN.AuthUserPass") &&
-						!strcmp(option, "-")) {
+		if (!strcmp(pv_options[i].cm_opt, "ProtoVPN.AuthUserPass") &&
+						!strcmp(option, "-"))
 			option = NULL;
-		}
 
 		if (connman_task_add_argument(task,
-				ov_options[i].ov_opt,
-				ov_options[i].has_value ? option : NULL) < 0) {
+				pv_options[i].pv_opt,
+				pv_options[i].has_value ? option : NULL) < 0)
 			return -EIO;
-		}
 	}
 
 	return 0;
 }
 
-static void close_management_interface(struct ov_private_data *data)
+/* From openvpn.c */
+static void close_management_interface(struct pv_private_data *data)
 {
 	if (data->mgmt_path) {
-		if (unlink(data->mgmt_path) != 0 && errno != ENOENT) {
-			connman_warn("Unable to unlink management socket %s: %d",
-						data->mgmt_path, errno);
-		}
+		if (unlink(data->mgmt_path) && errno != ENOENT)
+			connman_warn("Unable to unlink management socket %s: "
+						"%d", data->mgmt_path, errno);
+
 		g_free(data->mgmt_path);
 		data->mgmt_path = NULL;
 	}
 	if (data->mgmt_timer_id != 0) {
 		g_source_remove(data->mgmt_timer_id);
 		data->mgmt_timer_id = 0;
-	}
-	if (data->mgmt_socket_fd != -1) {
-		close(data->mgmt_socket_fd);
-		data->mgmt_socket_fd = -1;
 	}
 	if (data->mgmt_event_id) {
 		g_source_remove(data->mgmt_event_id);
@@ -397,9 +442,14 @@ static void close_management_interface(struct ov_private_data *data)
 	}
 }
 
-static void ov_died(struct connman_task *task, int exit_code, void *user_data)
+/*
+ * From openvpn.c. Called when VPN goes down, propagate the call to vpn_died(),
+ * if this is not implemented vpn_died() is called directly. This allows neat
+ * cleanup of any data related to this connection.
+ */
+static void pv_died(struct connman_task *task, int exit_code, void *user_data)
 {
-	struct ov_private_data *data = user_data;
+	struct pv_private_data *data = user_data;
 
 	/* Cancel any pending agent requests */
 	connman_agent_cancel(data);
@@ -411,13 +461,12 @@ static void ov_died(struct connman_task *task, int exit_code, void *user_data)
 	free_private_data(data);
 }
 
-static int run_connect(struct ov_private_data *data,
+static int run_connect(struct pv_private_data *data,
 			vpn_provider_connect_cb_t cb, void *user_data)
 {
 	struct vpn_provider *provider = data->provider;
 	struct connman_task *task = data->task;
 	const char *option;
-	int fd;
 	int err = 0;
 
 	option = vpn_provider_get_string(provider, "ProtoVPN.ConfigFile");
@@ -494,58 +543,103 @@ static int run_connect(struct ov_private_data *data,
 	 */
 	connman_task_add_argument(task, "--ping-restart", "0");
 
-	fd = fileno(stderr);
-	err = connman_task_run(task, ov_died, data,
-			NULL, &fd, &fd);
+	err = connman_task_run(task, pv_died, data, NULL, NULL, NULL);
 	if (err < 0) {
-		connman_error("protovpn failed to start");
-		err = -EIO;
-		goto done;
+		data->cb = NULL;
+		data->user_data = NULL;
+		connman_error("openvpn failed to start");
+		return -EIO;
+	} else {
+		/* This lets the caller know that the actual result of
+		 * the operation will be reported to the callback */
+		return -EINPROGRESS;
 	}
-
-done:
-	if (cb)
-		cb(provider, user_data, err);
-
-	return err;
 }
 
-static char *ov_quote_credential(char *pos, const char *cred)
+/* From openvpn.c */
+static void quote_credential(GString *line, const char *cred)
 {
-	*pos++ = '\"';
+	if (!line)
+		return;
+
+	g_string_append_c(line, '"');
+
 	while (*cred != '\0') {
-		if (*cred == ' ' || *cred == '"' || *cred == '\\') {
-			*pos++ = '\\';
+
+		switch (*cred) {
+		case ' ':
+		case '"':
+		case '\\':
+			g_string_append_c(line, '\\');
+			break;
+		default:
+			break;
 		}
-		*pos++ = *cred++;
+
+		g_string_append_c(line, *cred++);
 	}
-	*pos++ = '\"';
-	return pos;
+
+	g_string_append_c(line, '"');
+
+	return;
 }
 
-static void ov_return_credentials(struct ov_private_data *data,
+/* From openvpn.c */
+static void return_credentials(struct pv_private_data *data,
 				const char *username, const char *password)
 {
-	char *fmt[2] = { "username \"Auth\" ", "password \"Auth\" " };
-	char *reply, *pos;
+	GString *reply_string;
+	gchar *reply;
+	gsize len;
 
-	pos = reply = g_malloc0((strlen(username) + strlen(password)) * 2
-				+ strlen(fmt[0]) + strlen(fmt[1]) + 7);
-	pos += sprintf(pos, fmt[0], NULL);
-	pos = ov_quote_credential(pos, username);
-	pos += sprintf(pos, "\n");
-	pos += sprintf(pos, fmt[1], NULL);
-	pos = ov_quote_credential(pos, password);
-	pos += sprintf(pos, "\n");
+	reply_string = g_string_new(NULL);
 
-	g_io_channel_write_chars(data->mgmt_channel, reply, strlen(reply),
-								NULL, NULL);
+	g_string_append(reply_string, "username \"Auth\" ");
+	quote_credential(reply_string, username);
+	g_string_append_c(reply_string, '\n');
+
+	g_string_append(reply_string, "password \"Auth\" ");
+	quote_credential(reply_string, password);
+	g_string_append_c(reply_string, '\n');
+
+	len = reply_string->len;
+	reply = g_string_free(reply_string, FALSE);
+
+	g_io_channel_write_chars(data->mgmt_channel, reply, len, NULL, NULL);
 	g_io_channel_flush(data->mgmt_channel, NULL);
 
-	memset(reply, 0, strlen(reply));
+	memset(reply, 0, len);
 	g_free(reply);
 }
 
+/*
+ * From openvpn.c Demonstrates the use of password for password protected
+ * private key file
+ */
+static void return_private_key_password(struct pv_private_data *data,
+				const char *privatekeypass)
+{
+	GString *reply_string;
+	gchar *reply;
+	gsize len;
+
+	reply_string = g_string_new(NULL);
+
+	g_string_append(reply_string, "password \"Private Key\" ");
+	quote_credential(reply_string, privatekeypass);
+	g_string_append_c(reply_string, '\n');
+
+	len = reply_string->len;
+	reply = g_string_free(reply_string, FALSE);
+
+	g_io_channel_write_chars(data->mgmt_channel, reply, len, NULL, NULL);
+	g_io_channel_flush(data->mgmt_channel, NULL);
+
+	memset(reply, 0, len);
+	g_free(reply);
+}
+
+/* From openvpn.c */
 static void request_input_append_informational(DBusMessageIter *iter,
 		void *user_data)
 {
@@ -558,6 +652,7 @@ static void request_input_append_informational(DBusMessageIter *iter,
 				DBUS_TYPE_STRING, &str);
 }
 
+/* From openvpn.c */
 static void request_input_append_mandatory(DBusMessageIter *iter,
 		void *user_data)
 {
@@ -570,6 +665,7 @@ static void request_input_append_mandatory(DBusMessageIter *iter,
 				DBUS_TYPE_STRING, &str);
 }
 
+/* From openvpn.c */
 static void request_input_append_password(DBusMessageIter *iter,
 		void *user_data)
 {
@@ -582,17 +678,36 @@ static void request_input_append_password(DBusMessageIter *iter,
 				DBUS_TYPE_STRING, &str);
 }
 
+/* From openvpn.c. Example of how to process request input credentials reply */
 static void request_input_credentials_reply(DBusMessage *reply, void *user_data)
 {
-	struct ov_private_data *data = user_data;
-	char *password = NULL, *username = NULL;
+	struct pv_private_data *data = user_data;
+	char *password = NULL;
+	char *username = NULL;
 	char *key;
 	DBusMessageIter iter, dict;
+	DBusError error;
+	int err;
 
 	DBG("provider %p", data->provider);
 
-	if (!reply || dbus_message_get_type(reply) == DBUS_MESSAGE_TYPE_ERROR)
+	if (!reply)
 		goto err;
+
+	dbus_error_init(&error);
+
+	/*
+	 * Check the error with VPN agent function to get proper code and to
+	 * get callback called.
+	 */
+	err = vpn_agent_check_and_process_reply_error(reply, data->provider,
+				data->task, data->cb, data->user_data);
+	if (err) {
+		/* Ensure cb is called only once */
+		data->cb = NULL;
+		data->user_data = NULL;
+		return;
+	}
 
 	if (!vpn_agent_check_reply_has_dict(reply))
 		goto err;
@@ -641,16 +756,18 @@ static void request_input_credentials_reply(DBusMessage *reply, void *user_data)
 	if (!password || !username)
 		goto err;
 
-	ov_return_credentials(data, username, password);
+	return_credentials(data, username, password);
 
 	return;
 
 err:
+	pv_connect_done(data, EACCES);
 	vpn_provider_indicate_error(data->provider,
-			VPN_PROVIDER_ERROR_AUTH_FAILED);
+					VPN_PROVIDER_ERROR_AUTH_FAILED);
 }
 
-static int request_credentials_input(struct ov_private_data *data)
+/* From openvpn.c, demonstrates use of credential input */
+static int request_credentials_input(struct pv_private_data *data)
 {
 	DBusMessage *message;
 	const char *path, *agent_sender, *agent_path;
@@ -661,7 +778,7 @@ static int request_credentials_input(struct ov_private_data *data)
 
 	agent = connman_agent_get_info(data->dbus_sender, &agent_sender,
 							&agent_path);
-	if (!data->provider || !agent || !agent_path)
+	if (!agent || !agent_path)
 		return -ESRCH;
 
 	message = dbus_message_new_method_call(agent_sender, agent_path,
@@ -673,8 +790,7 @@ static int request_credentials_input(struct ov_private_data *data)
 	dbus_message_iter_init_append(message, &iter);
 
 	path = vpn_provider_get_path(data->provider);
-	dbus_message_iter_append_basic(&iter,
-				DBUS_TYPE_OBJECT_PATH, &path);
+	dbus_message_iter_append_basic(&iter, DBUS_TYPE_OBJECT_PATH, &path);
 
 	connman_dbus_dict_open(&iter, &dict);
 
@@ -685,10 +801,10 @@ static int request_credentials_input(struct ov_private_data *data)
 
 	/* Request temporary properties to pass on to protovpn */
 	connman_dbus_dict_append_dict(&dict, "ProtoVPN.Username",
-			request_input_append_mandatory, NULL);
+					request_input_append_mandatory, NULL);
 
 	connman_dbus_dict_append_dict(&dict, "ProtoVPN.Password",
-			request_input_append_password, NULL);
+					request_input_append_password, NULL);
 
 	vpn_agent_append_host_and_name(&dict, data->provider);
 
@@ -710,14 +826,182 @@ static int request_credentials_input(struct ov_private_data *data)
 	return -EINPROGRESS;
 }
 
+/*
+ * From openvpn.c, demonstrates the way how to handle the input for protected 
+ * private key.
+ */
+static void request_input_private_key_reply(DBusMessage *reply,
+							void *user_data)
+{
+	struct pv_private_data *data = user_data;
+	const char *privatekeypass = NULL;
+	const char *key;
+	DBusMessageIter iter, dict;
+	DBusError error;
+	int err;
 
-static gboolean ov_management_handle_input(GIOChannel *source,
+	DBG("provider %p", data->provider);
+
+	if (!reply)
+		goto err;
+
+	dbus_error_init(&error);
+
+	err = vpn_agent_check_and_process_reply_error(reply, data->provider,
+				data->task, data->cb, data->user_data);
+	if (err) {
+		/* Ensure cb is called only once */
+		data->cb = NULL;
+		data->user_data = NULL;
+		return;
+	}
+
+	if (!vpn_agent_check_reply_has_dict(reply))
+		goto err;
+
+	dbus_message_iter_init(reply, &iter);
+	dbus_message_iter_recurse(&iter, &dict);
+	while (dbus_message_iter_get_arg_type(&dict) == DBUS_TYPE_DICT_ENTRY) {
+		DBusMessageIter entry, value;
+
+		dbus_message_iter_recurse(&dict, &entry);
+		if (dbus_message_iter_get_arg_type(&entry) != DBUS_TYPE_STRING)
+			break;
+
+		dbus_message_iter_get_basic(&entry, &key);
+
+		if (g_str_equal(key, "ProtoVPN.PrivateKeyPassword")) {
+			dbus_message_iter_next(&entry);
+			if (dbus_message_iter_get_arg_type(&entry)
+							!= DBUS_TYPE_VARIANT)
+				break;
+			dbus_message_iter_recurse(&entry, &value);
+			if (dbus_message_iter_get_arg_type(&value)
+							!= DBUS_TYPE_STRING)
+				break;
+			dbus_message_iter_get_basic(&value, &privatekeypass);
+			vpn_provider_set_string_hide_value(data->provider,
+					key, privatekeypass);
+
+		}
+
+		dbus_message_iter_next(&dict);
+	}
+
+	if (!privatekeypass)
+		goto err;
+
+	return_private_key_password(data, privatekeypass);
+
+	return;
+
+err:
+	pv_connect_done(data, EACCES);
+	vpn_provider_indicate_error(data->provider,
+			VPN_PROVIDER_ERROR_AUTH_FAILED);
+}
+
+/*
+ * From openvpn.c, this is for requesting the private key input in addition
+ * to the credential request. This will create a separate dialog to UI.
+ *
+  * Also contains examples how to use the credential storage via VPN agent.
+ */
+static int request_private_key_input(struct pv_private_data *data)
+{
+	DBusMessage *message;
+	const char *path, *agent_sender, *agent_path;
+	const char *privatekeypass;
+	DBusMessageIter iter;
+	DBusMessageIter dict;
+	int err;
+	void *agent;
+
+	/*
+	 * First check if this is the second attempt to get the key within
+	 * this connection. In such case there has been invalid Private Key
+	 * Password and it must be reset, and queried from user.
+	 */
+	if (data->failed_attempts_privatekey) {
+		vpn_provider_set_string_hide_value(data->provider,
+					"ProtoVPN.PrivateKeyPassword", NULL);
+	} else {
+		/* If the encrypted Private key password is kept in memory and
+		 * use it first. If authentication fails this is cleared,
+		 * likewise it is when connman-vpnd is restarted.
+		 */
+		privatekeypass = vpn_provider_get_string(data->provider,
+					"ProtoVPN.PrivateKeyPassword");
+		if (privatekeypass) {
+			/* TODO remove this after 3.4.0 */
+			data->failed_attempts_privatekey++;
+
+			return_private_key_password(data, privatekeypass);
+			goto out;
+		}
+	}
+
+	agent = connman_agent_get_info(data->dbus_sender, &agent_sender,
+							&agent_path);
+	if (!agent || !agent_path)
+		return -ESRCH;
+
+	message = dbus_message_new_method_call(agent_sender, agent_path,
+					VPN_AGENT_INTERFACE, "RequestInput");
+	if (!message)
+		return -ENOMEM;
+
+	dbus_message_iter_init_append(message, &iter);
+
+	path = vpn_provider_get_path(data->provider);
+	dbus_message_iter_append_basic(&iter,DBUS_TYPE_OBJECT_PATH, &path);
+
+	connman_dbus_dict_open(&iter, &dict);
+
+	connman_dbus_dict_append_dict(&dict, "ProtoVPN.PrivateKeyPassword",
+					request_input_append_password, NULL);
+
+	vpn_agent_append_host_and_name(&dict, data->provider);
+
+	/* Do not allow to store or retrieve the encrypted Private Key pass */
+	vpn_agent_append_allow_credential_storage(&dict, false);
+	vpn_agent_append_allow_credential_retrieval(&dict, false);
+	/*
+	 * Indicate to keep credentials, the enc Private Key password should not
+	 * affect the credential storing.
+	 */
+	vpn_agent_append_keep_credentials(&dict, true);
+
+	connman_dbus_dict_append_dict(&dict, "Enter Private Key password",
+			request_input_append_informational, NULL);
+
+	connman_dbus_dict_close(&iter, &dict);
+
+	err = connman_agent_queue_message(data->provider, message,
+			connman_timeout_input_request(),
+			request_input_private_key_reply, data, agent);
+
+	if (err < 0 && err != -EBUSY) {
+		DBG("error %d sending agent request", err);
+		dbus_message_unref(message);
+
+		return err;
+	}
+
+	dbus_message_unref(message);
+
+out:
+	return -EINPROGRESS;
+}
+
+/* From openvpn.c */
+static gboolean pv_vpn_management_handle_input(GIOChannel *source,
 				GIOCondition condition, gpointer user_data)
 {
-	struct ov_private_data *data = user_data;
+	struct pv_private_data *data = user_data;
 	char *str = NULL;
 	int err = 0;
-	gboolean close = FALSE;
+	gboolean close = false;
 
 	if ((condition & G_IO_IN) &&
 		g_io_channel_read_line(source, &str, NULL, NULL, NULL) ==
@@ -733,57 +1017,67 @@ static gboolean ov_management_handle_input(GIOChannel *source,
 			if (err != -EINPROGRESS) {
 				vpn_provider_indicate_error(data->provider,
 					VPN_PROVIDER_ERROR_LOGIN_FAILED);
-				close = TRUE;
+				close = true;
+			}
+		} else if (g_str_has_prefix(str,
+				">PASSWORD:Need 'Private Key'")) {
+			err = request_private_key_input(data);
+			if (err != -EINPROGRESS) {
+				vpn_provider_indicate_error(data->provider,
+					VPN_PROVIDER_ERROR_LOGIN_FAILED);
+				close = true;
 			}
 		} else if (g_str_has_prefix(str,
 				">PASSWORD:Verification Failed: 'Auth'")) {
-			++data->failed_attempts;
+			data->failed_attempts++;
+		} else if (g_str_has_prefix(str, ">PASSWORD:Verification "
+				"Failed: 'Private Key'")) {
+			data->failed_attempts_privatekey++;
 		}
 
 		g_free(str);
 	} else if (condition & (G_IO_ERR | G_IO_HUP)) {
 		connman_warn("Management channel termination");
-		close = TRUE;
+		close = true;
 	}
 
-	if (close) {
+	if (close)
 		close_management_interface(data);
-	}
 
-	return TRUE;
+	return true;
 }
 
-static int ov_management_connect_timer_cb(gpointer user_data)
+/* From openvpn.c */
+static int pv_vpn_management_connect_timer_cb(gpointer user_data)
 {
-	struct ov_private_data *data = user_data;
-	struct sockaddr_un remote;
-	int err = 0;
+	struct pv_private_data *data = user_data;
 
-	if (data->mgmt_socket_fd == -1) {
-		data->mgmt_socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-		if (data->mgmt_socket_fd == -1) {
-			connman_warn("Unable to create management socket");
-		}
-	}
+	if (!data->mgmt_channel) {
+		int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+		if (fd >= 0) {
+			struct sockaddr_un remote;
+			int err;
 
-	if (data->mgmt_socket_fd != -1) {
-		memset(&remote, 0, sizeof(remote));
-		remote.sun_family = AF_UNIX;
-		g_strlcpy(remote.sun_path, data->mgmt_path,
+			memset(&remote, 0, sizeof(remote));
+			remote.sun_family = AF_UNIX;
+			g_strlcpy(remote.sun_path, data->mgmt_path,
 						sizeof(remote.sun_path));
 
-		err = connect(data->mgmt_socket_fd, (struct sockaddr *)&remote,
-							sizeof(remote));
-		if (err == 0) {
-			data->mgmt_channel =
-				g_io_channel_unix_new(data->mgmt_socket_fd);
-			data->mgmt_event_id = g_io_add_watch(data->mgmt_channel,
-					G_IO_IN | G_IO_ERR | G_IO_HUP,
-					ov_management_handle_input, data);
+			err = connect(fd, (struct sockaddr *)&remote,
+						sizeof(remote));
+			if (err == 0) {
+				data->mgmt_channel = g_io_channel_unix_new(fd);
+				data->mgmt_event_id =
+					g_io_add_watch(data->mgmt_channel,
+						G_IO_IN | G_IO_ERR | G_IO_HUP,
+						pv_vpn_management_handle_input,
+						data);
 
-			connman_warn("Connected management socket");
-			data->mgmt_timer_id = 0;
-			return G_SOURCE_REMOVE;
+				connman_warn("Connected management socket");
+				data->mgmt_timer_id = 0;
+				return G_SOURCE_REMOVE;
+			}
+			close(fd);
 		}
 	}
 
@@ -797,83 +1091,57 @@ static int ov_management_connect_timer_cb(gpointer user_data)
 	return G_SOURCE_CONTINUE;
 }
 
-
-
-static int ov_connect(struct vpn_provider *provider,
+/* From openvpn.c */
+static int pv_vpn_connect(struct vpn_provider *provider,
 			struct connman_task *task, const char *if_name,
 			vpn_provider_connect_cb_t cb, const char *dbus_sender,
 			void *user_data)
 {
-	const char *option;
-	struct ov_private_data *data;
+	const char *tmpdir;
+	struct pv_private_data *data;
 
-	option = vpn_provider_get_string(provider, "Host");
-	if (!option) {
-		connman_error("Host not set; cannot enable VPN");
-		return -EINVAL;
-	}
-
-	data = g_try_new0(struct ov_private_data, 1);
+	data = g_try_new0(struct pv_private_data, 1);
 	if (!data)
 		return -ENOMEM;
 
-	data->provider = provider;
+	vpn_provider_set_plugin_data(provider, data);
+	data->provider = vpn_provider_ref(provider);
 	data->task = task;
 	data->dbus_sender = g_strdup(dbus_sender);
 	data->if_name = g_strdup(if_name);
 	data->cb = cb;
 	data->user_data = user_data;
-	data->mgmt_path = NULL;
-	data->mgmt_timer_id = 0;
-	data->mgmt_socket_fd = -1;
-	data->mgmt_event_id = 0;
-	data->mgmt_channel = NULL;
-	data->connect_attempts = 0;
-	data->failed_attempts = 0;
 
-	option = vpn_provider_get_string(provider, "ProtoVPN.AuthUserPass");
-	if (option && !strcmp(option, "-")) {
-		/*
-		 * We need to use the management interface to provide
-		 * the user credentials
-		 */
+	/*
+	 * This demonstrates how it is recommended to setup a management
+	 * interface for a VPN. It is for reacting to control data coming from
+	 * the VPN, as well as possibly sending data to the VPN.
+	 */
 
-		/* Set up the path for the management interface */
-		data->mgmt_path = g_strconcat("/tmp/connman-vpn-management-",
-			vpn_provider_get_string(provider, "Host"), "-", 
-			vpn_provider_get_string(provider, "Domain"), NULL);
-		if (unlink(data->mgmt_path) != 0 && errno != ENOENT) {
-			connman_warn("Unable to unlink management socket %s: %d",
-						data->mgmt_path, errno);
-		}
+	/* Use env TMPDIR for creating management socket, fall back to /tmp */
+	tmpdir = getenv("TMPDIR");
+	if (!tmpdir || !*tmpdir)
+		tmpdir = "/tmp";
 
-		data->mgmt_timer_id = g_timeout_add(200,
-					ov_management_connect_timer_cb, data);
+	/* Set up the path for the management interface */
+	data->mgmt_path = g_strconcat(tmpdir, "/tmp/connman-vpn-management-",
+				vpn_provider_get_string(provider, "Name"), "-",
+				vpn_provider_get_string(provider, "Host"),
+				NULL);
+
+	/* Remove the old management interface if it exists */
+	if (unlink(data->mgmt_path) != 0 && errno != ENOENT) {
+		connman_warn("Unable to unlink management socket %s: %d",
+					data->mgmt_path, errno);
 	}
+
+	/* Setup periodic check */
+	data->mgmt_timer_id = g_timeout_add(200,
+				pv_vpn_management_connect_timer_cb, data);
 
 	task_append_config_data(provider, task);
 
 	return run_connect(data, cb, user_data);
-}
-
-static int ov_device_flags(struct vpn_provider *provider)
-{
-	const char *option;
-
-	option = vpn_provider_get_string(provider, "ProtoVPN.DeviceType");
-	if (!option) {
-		return IFF_TUN;
-	}
-
-	if (g_str_equal(option, "tap")) {
-		return IFF_TAP;
-	}
-
-	if (!g_str_equal(option, "tun")) {
-		connman_warn("bad ProtoVPN.DeviceType value, falling back to tun");
-	}
-
-	return IFF_TUN;
 }
 
 /*
@@ -882,35 +1150,42 @@ static int ov_device_flags(struct vpn_provider *provider)
 static int pv_notify(DBusMessage *msg, struct vpn_provider *provider)
 {
 	connman_info("pv_notify");
-	return ov_notify(msg, provider);
+	return pv_vpn_notify(msg, provider);
 }
 
 /*
  * Connect VPN.
  * Get settings from provider using: vpn_provider_get_string().
  * Add arguments to task with connman_task_add_argument().
- * if_name 
- * cb
- * dbus_sender address of the caller
- * user_data 
+ *   if_name      interface to use for connect attempt
+ *   cb           connect callback (vpn-provider.c)
+ *   dbus_sender  address of the caller
+ *   user_data    additional data passed by vpn-provider.c
  */
 static int pv_connect(struct vpn_provider *provider, struct connman_task *task,
-		const char *if_name, vpn_provider_connect_cb_t cb,
-		const char *dbus_sender, void *user_data)
+			const char *if_name, vpn_provider_connect_cb_t cb,
+			const char *dbus_sender, void *user_data)
 {
 	connman_info("pv_connect");
-	return ov_connect(provider, task, if_name, cb, dbus_sender, user_data);
+	return pv_vpn_connect(provider, task, if_name, cb, dbus_sender,
+								user_data);
 }
 
 /*
  * Handle VPN disconnect.
  *
- * Implementation not madnatory.
+ * Implementation not madnatory but may be useful if functionality is close
+ * to, e.g., OpenVPN.
  */
 void pv_disconnect(struct vpn_provider *provider)
 {
+	if (!provider)
+		return;
+
 	connman_info("pv_disconnect");
-	return;
+
+	connman_agent_cancel(provider);
+
 }
 
 /*
@@ -925,14 +1200,15 @@ static int pv_error_code(struct vpn_provider *provider, int exit_code)
 }
 
 /*
- * Save the VPN configuration to a keyfile.
+ * Save the VPN configuration to a keyfile for this specific VPN type. Provider
+ * saves provider related configuration options.
  *
- * Implementation not madnatory.
+ * Implementation not madnatory if there is no specific options.
  */
 static int pv_save(struct vpn_provider *provider, GKeyFile *keyfile)
 {
 	connman_info("pv_save");
-	return ov_save(provider, keyfile);
+	return pv_vpn_save(provider, keyfile);
 }
 
 /*
@@ -944,20 +1220,33 @@ static int pv_save(struct vpn_provider *provider, GKeyFile *keyfile)
  */
 static int pv_device_flags(struct vpn_provider *provider)
 {
+	const char *option;
+
 	connman_info("pv_device_flags");
-	return ov_device_flags(provider);
+
+	option = vpn_provider_get_string(provider, "ProtoVPN.DeviceType");
+	if (!option)
+		return IFF_TUN;
+
+	if (g_str_equal(option, "tap"))
+		return IFF_TAP;
+
+	if (!g_str_equal(option, "tun"))
+		connman_warn("bad ProtoVPN.DeviceType value, fallback to tun");
+
+	return IFF_TUN;
 }
 
 /*
- * Function for parsing the enviroment values. If this function is defined it is
- * called by vpn-provider.c:route_env_parse().
+ * Function for parsing the enviroment values. If this function is defined it
+ * is called by vpn-provider.c:route_env_parse().
  *
  * @provider: vpn_provider structure for this plugin
  * @key: Key to parse
  * @family: Protocol family (AF_INET, AF_INET6)
  * @idx: 
- * @type: type of the provider route, defined as enum vpn_provider_route_type in
- *        connman/vpn/vpn-provider.h. Values: PROVIDER_ROUTE_TYPE_NONE = 0,
+ * @type: type of the provider route, defined as enum vpn_provider_route_type
+ *        in connman/vpn/vpn-provider.h. Values: PROVIDER_ROUTE_TYPE_NONE = 0,
  *        PROVIDER_ROUTE_TYPE_MASK = 1, PROVIDER_ROUTE_TYPE_ADDR = 2 and
  *        PROVIDER_ROUTE_TYPE_GW = 3
  *
@@ -968,7 +1257,8 @@ static int pv_device_flags(struct vpn_provider *provider)
 */
 
 int pv_route_env_parse(struct vpn_provider *provider, const char *key,
-			int *family, unsigned long *idx, enum vpn_provider_route_type *type)
+					int *family, unsigned long *idx,
+					enum vpn_provider_route_type *type)
 {
 	char *end;
 	const char *start;
@@ -998,14 +1288,14 @@ int pv_route_env_parse(struct vpn_provider *provider, const char *key,
  * VPN driver structure, defined in connman/vpn/plugins/vpn.h
  */
 static struct vpn_driver vpn_driver = {
-/*		.flags				= VPN_FLAG_NO_TUN, predefine flags for plugin */
-        .notify         	= pv_notify,
-        .connect        	= pv_connect,
-        .disconnect			= pv_disconnect,
-        .error_code     	= pv_error_code,
-        .save           	= pv_save,
-        .device_flags   	= pv_device_flags,
-        .route_env_parse 	= pv_route_env_parse,
+/*	.flags			= VPN_FLAG_NO_TUN, predefine flags for plugin */
+	.notify			= pv_notify,
+	.connect		= pv_connect,
+	.disconnect		= pv_disconnect,
+	.error_code		= pv_error_code,
+	.save			= pv_save,
+	.device_flags		= pv_device_flags,
+	.route_env_parse	= pv_route_env_parse,
 };
 
 /*
@@ -1015,7 +1305,6 @@ static struct vpn_driver vpn_driver = {
 static int protovpn_init(void)
 {
 	int rval = 0;
-	// name, driver, path
 	connman_info("protovpn_init");
 	connection = connman_dbus_get_connection();
 	rval = vpn_register(PLUGIN_NAME, &vpn_driver, BIN_PATH);
