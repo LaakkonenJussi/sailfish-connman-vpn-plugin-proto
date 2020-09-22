@@ -106,7 +106,6 @@ struct pv_private_data {
 	guint mgmt_event_id;
 	GIOChannel *mgmt_channel;
 	int connect_attempts;
-	int failed_attempts;
 	int failed_attempts_privatekey;
 };
 
@@ -126,10 +125,8 @@ static void pv_connect_done(struct pv_private_data *data, int err)
 		cb(data->provider, user_data, err);
 	}
 
-	if (!err) {
-		data->failed_attempts = 0;
+	if (!err)
 		data->failed_attempts_privatekey = 0;
-	}
 }
 
 /* From openvpn.c */
@@ -687,12 +684,14 @@ static void request_input_credentials_reply(DBusMessage *reply, void *user_data)
 	char *key;
 	DBusMessageIter iter, dict;
 	DBusError error;
-	int err;
+	int err = 0;
 
 	DBG("provider %p", data->provider);
 
-	if (!reply)
+	if (!reply) {
+		err = ENOENT;
 		goto err;
+	}
 
 	dbus_error_init(&error);
 
@@ -709,8 +708,10 @@ static void request_input_credentials_reply(DBusMessage *reply, void *user_data)
 		return;
 	}
 
-	if (!vpn_agent_check_reply_has_dict(reply))
+	if (!vpn_agent_check_reply_has_dict(reply)) {
+		err = ENOENT;
 		goto err;
+	}
 
 	dbus_message_iter_init(reply, &iter);
 	dbus_message_iter_recurse(&iter, &dict);
@@ -753,17 +754,19 @@ static void request_input_credentials_reply(DBusMessage *reply, void *user_data)
 		dbus_message_iter_next(&dict);
 	}
 
-	if (!password || !username)
+	if (!password || !username) {
+		vpn_provider_indicate_error(data->provider,
+					VPN_PROVIDER_ERROR_AUTH_FAILED);
+		err = EACCES;
 		goto err;
+	}
 
 	return_credentials(data, username, password);
 
 	return;
 
 err:
-	pv_connect_done(data, EACCES);
-	vpn_provider_indicate_error(data->provider,
-					VPN_PROVIDER_ERROR_AUTH_FAILED);
+	pv_connect_done(data, err);
 }
 
 /* From openvpn.c, demonstrates use of credential input */
@@ -794,10 +797,8 @@ static int request_credentials_input(struct pv_private_data *data)
 
 	connman_dbus_dict_open(&iter, &dict);
 
-	if (data->failed_attempts > 0) {
-		connman_dbus_dict_append_dict(&dict, "VpnAgent.AuthFailure",
-			request_input_append_informational, NULL);
-	}
+	if (vpn_provider_get_authentication_errors(data->provider))
+		vpn_agent_append_auth_failure(&dict, data->provider, NULL);
 
 	/* Request temporary properties to pass on to protovpn */
 	connman_dbus_dict_append_dict(&dict, "ProtoVPN.Username",
@@ -838,12 +839,14 @@ static void request_input_private_key_reply(DBusMessage *reply,
 	const char *key;
 	DBusMessageIter iter, dict;
 	DBusError error;
-	int err;
+	int err = 0;
 
 	DBG("provider %p", data->provider);
 
-	if (!reply)
+	if (!reply) {
+		err = ENOENT;
 		goto err;
+	}
 
 	dbus_error_init(&error);
 
@@ -856,8 +859,10 @@ static void request_input_private_key_reply(DBusMessage *reply,
 		return;
 	}
 
-	if (!vpn_agent_check_reply_has_dict(reply))
+	if (!vpn_agent_check_reply_has_dict(reply)) {
+		err = ENOENT;
 		goto err;
+	}
 
 	dbus_message_iter_init(reply, &iter);
 	dbus_message_iter_recurse(&iter, &dict);
@@ -888,17 +893,19 @@ static void request_input_private_key_reply(DBusMessage *reply,
 		dbus_message_iter_next(&dict);
 	}
 
-	if (!privatekeypass)
+	if (!privatekeypass) {
+		vpn_provider_indicate_error(data->provider,
+					VPN_PROVIDER_ERROR_AUTH_FAILED);
+		err = EACCES;
 		goto err;
+	}
 
 	return_private_key_password(data, privatekeypass);
 
 	return;
 
 err:
-	pv_connect_done(data, EACCES);
-	vpn_provider_indicate_error(data->provider,
-			VPN_PROVIDER_ERROR_AUTH_FAILED);
+	pv_connect_done(data, err);
 }
 
 /*
@@ -933,9 +940,6 @@ static int request_private_key_input(struct pv_private_data *data)
 		privatekeypass = vpn_provider_get_string(data->provider,
 					"ProtoVPN.PrivateKeyPassword");
 		if (privatekeypass) {
-			/* TODO remove this after 3.4.0 */
-			data->failed_attempts_privatekey++;
-
 			return_private_key_password(data, privatekeypass);
 			goto out;
 		}
@@ -1003,33 +1007,34 @@ static gboolean pv_vpn_management_handle_input(GIOChannel *source,
 	int err = 0;
 	gboolean close = false;
 
-	if ((condition & G_IO_IN) &&
-		g_io_channel_read_line(source, &str, NULL, NULL, NULL) ==
-							G_IO_STATUS_NORMAL) {
+	if (condition & G_IO_IN) {
+		if (g_io_channel_read_line(source, &str, NULL, NULL, NULL) !=
+							G_IO_STATUS_NORMAL)
+			return true;
+
 		str[strlen(str) - 1] = '\0';
-		connman_warn("protovpn request '%s'", str);
+		connman_warn("protovpn request %s", str);
 
 		if (g_str_has_prefix(str, ">PASSWORD:Need 'Auth'")) {
 			/*
 			 * Request credentials from the user
 			 */
 			err = request_credentials_input(data);
-			if (err != -EINPROGRESS) {
-				vpn_provider_indicate_error(data->provider,
-					VPN_PROVIDER_ERROR_LOGIN_FAILED);
+			if (err != -EINPROGRESS)
 				close = true;
-			}
 		} else if (g_str_has_prefix(str,
 				">PASSWORD:Need 'Private Key'")) {
 			err = request_private_key_input(data);
-			if (err != -EINPROGRESS) {
-				vpn_provider_indicate_error(data->provider,
-					VPN_PROVIDER_ERROR_LOGIN_FAILED);
+			if (err != -EINPROGRESS)
 				close = true;
-			}
 		} else if (g_str_has_prefix(str,
 				">PASSWORD:Verification Failed: 'Auth'")) {
-			data->failed_attempts++;
+			/*
+			 * This makes it possible to add error only without
+			 * sending a state change indication signal to the VPN.
+			*/
+			vpn_provider_add_error(data->provider,
+					VPN_PROVIDER_ERROR_AUTH_FAILED);
 		} else if (g_str_has_prefix(str, ">PASSWORD:Verification "
 				"Failed: 'Private Key'")) {
 			data->failed_attempts_privatekey++;
@@ -1081,7 +1086,7 @@ static int pv_vpn_management_connect_timer_cb(gpointer user_data)
 		}
 	}
 
-	++data->connect_attempts;
+	data->connect_attempts++;
 	if (data->connect_attempts > 30) {
 		connman_warn("Unable to connect management socket");
 		data->mgmt_timer_id = 0;
