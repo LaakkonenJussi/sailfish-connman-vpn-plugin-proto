@@ -102,7 +102,6 @@ struct pv_private_data {
 	void *user_data;
 	char *mgmt_path;
 	guint mgmt_timer_id;
-	int mgmt_socket_fd;
 	guint mgmt_event_id;
 	GIOChannel *mgmt_channel;
 	int connect_attempts;
@@ -362,7 +361,7 @@ static int pv_vpn_save(struct vpn_provider *provider, GKeyFile *keyfile)
 	int i;
 
 	for (i = 0; i < (int)ARRAY_SIZE(pv_options); i++) {
-		if (strncmp(pv_options[i].cm_opt, "ProtoVPN.", 8) == 0) {
+		if (strncmp(pv_options[i].cm_opt, "ProtoVPN.", 9) == 0) {
 			option = vpn_provider_get_string(provider,
 							pv_options[i].cm_opt);
 			if (!option)
@@ -449,7 +448,7 @@ static void pv_died(struct connman_task *task, int exit_code, void *user_data)
 	struct pv_private_data *data = user_data;
 
 	/* Cancel any pending agent requests */
-	connman_agent_cancel(data);
+	connman_agent_cancel(data->provider);
 
 	close_management_interface(data);
 
@@ -811,7 +810,7 @@ static int request_credentials_input(struct pv_private_data *data)
 
 	connman_dbus_dict_close(&iter, &dict);
 
-	err = connman_agent_queue_message(data, message,
+	err = connman_agent_queue_message(data->provider, message,
 			connman_timeout_input_request(),
 			request_input_credentials_reply, data, agent);
 
@@ -1005,13 +1004,11 @@ static gboolean pv_vpn_management_handle_input(GIOChannel *source,
 	struct pv_private_data *data = user_data;
 	char *str = NULL;
 	int err = 0;
-	gboolean close = false;
+	gboolean close = FALSE;
 
-	if (condition & G_IO_IN) {
-		if (g_io_channel_read_line(source, &str, NULL, NULL, NULL) !=
-							G_IO_STATUS_NORMAL)
-			return true;
-
+	if ((condition & G_IO_IN) &&
+		g_io_channel_read_line(source, &str, NULL, NULL, NULL) ==
+							G_IO_STATUS_NORMAL) {
 		str[strlen(str) - 1] = '\0';
 		connman_warn("protovpn request %s", str);
 
@@ -1021,12 +1018,12 @@ static gboolean pv_vpn_management_handle_input(GIOChannel *source,
 			 */
 			err = request_credentials_input(data);
 			if (err != -EINPROGRESS)
-				close = true;
+				close = TRUE;
 		} else if (g_str_has_prefix(str,
 				">PASSWORD:Need 'Private Key'")) {
 			err = request_private_key_input(data);
 			if (err != -EINPROGRESS)
-				close = true;
+				close = TRUE;
 		} else if (g_str_has_prefix(str,
 				">PASSWORD:Verification Failed: 'Auth'")) {
 			/*
@@ -1043,13 +1040,13 @@ static gboolean pv_vpn_management_handle_input(GIOChannel *source,
 		g_free(str);
 	} else if (condition & (G_IO_ERR | G_IO_HUP)) {
 		connman_warn("Management channel termination");
-		close = true;
+		close = TRUE;
 	}
 
 	if (close)
 		close_management_interface(data);
 
-	return true;
+	return TRUE;
 }
 
 /* From openvpn.c */
@@ -1128,8 +1125,13 @@ static int pv_vpn_connect(struct vpn_provider *provider,
 	if (!tmpdir || !*tmpdir)
 		tmpdir = "/tmp";
 
-	/* Set up the path for the management interface */
-	data->mgmt_path = g_strconcat(tmpdir, "/tmp/connman-vpn-management-",
+	/*
+	 * Set up the path for the management interface.
+	 *
+	 * TODO: In 3.4.0 replace both vpn_provider_get_string() with one
+	 * vpn_provider_get_ident(provider) call.
+	*/
+	data->mgmt_path = g_strconcat(tmpdir, "/connman-vpn-management-",
 				vpn_provider_get_string(provider, "Name"), "-",
 				vpn_provider_get_string(provider, "Host"),
 				NULL);
