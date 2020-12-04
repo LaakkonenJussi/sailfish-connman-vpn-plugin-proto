@@ -1189,14 +1189,29 @@ void pv_disconnect(struct vpn_provider *provider)
 }
 
 /*
- * Handle exit/error_code.
+ * Handle exit/error_code. Return value should be translated to enum
+ * vpn_provider_error. This is called by vpn/plugins/vpn.c:vpn_died()
+ * and after calling vpn_provider_indicate_error() is called with the
+ * return value to record the error, changing the state to
+ * VPN_PROVIDER_STATE_FAILURE.
  * 
  * Implementation not madnatory.
  */
 static int pv_error_code(struct vpn_provider *provider, int exit_code)
 {
 	connman_info("pv_error_code %d", exit_code);
-	return 0;
+
+	/* Translate the exit code to enum vpn_provider_error */
+	switch (exit_code) {
+	case 0:
+		return VPN_PROVIDER_ERROR_UNKNOWN;
+	case 1:
+		return VPN_PROVIDER_ERROR_CONNECT_FAILED;
+	case 2:
+		return VPN_PROVIDER_ERROR_LOGIN_FAILED;
+	default:
+		return VPN_PROVIDER_ERROR_AUTH_FAILED;
+	}
 }
 
 /*
