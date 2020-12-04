@@ -1159,6 +1159,12 @@ static int pv_notify(DBusMessage *msg, struct vpn_provider *provider)
 	connman_info("pv_notify");
 	return pv_vpn_notify(msg, provider);
 }
+/*
+ * As of now something calls vpn_provider_indicate_error() twice resulting in
+ * the connection error to be increased at every connection failure by 2. So
+ * having 10 as limit here means that 5th error is the actual limit.
+ */
+#define MAX_CONNECTION_ERRORS 10
 
 /*
  * Connect VPN.
@@ -1173,7 +1179,21 @@ static int pv_connect(struct vpn_provider *provider, struct connman_task *task,
 			const char *if_name, vpn_provider_connect_cb_t cb,
 			const char *dbus_sender, void *user_data)
 {
+	int errors;
+
 	connman_info("pv_connect");
+
+	errors = vpn_provider_get_connection_errors(provider);
+	connman_info("%d connection errors", errors);
+
+	/*
+	 * When there are too many connection errors, return -ECANCELED to
+	 * stop autoconnecting. Error counter is reset when the VPN provider
+	 * is saved (this plugin has no UI so that cannot be done).
+	 */
+	if (errors >= MAX_CONNECTION_ERRORS)
+		return -ECANCELED;
+
 	return pv_vpn_connect(provider, task, if_name, cb, dbus_sender,
 								user_data);
 }
